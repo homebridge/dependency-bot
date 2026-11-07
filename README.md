@@ -252,10 +252,24 @@ Create a configuration file (default: `.github/homebridge-dependency-bot.json`) 
 | `directories[].directory` | Path to directory containing package.json | Yes | - |
 | `directories[].packages` | Array of packages to update | Yes | - |
 | `directories[].packages[].name` | NPM package name | Yes | - |
-| `directories[].packages[].tag` | NPM dist-tag to install (e.g., "beta", "alpha") | No* | - |
+| `directories[].packages[].tag` | NPM dist-tag or version range to install (e.g., "beta", "^26.x.x"), or a list of them (e.g., `["alpha", "beta"]`) to install whichever resolves to the highest version | No* | - |
 | `directories[].packages[].pattern` | Regex pattern to match versions | No* | - |
 
 *Note: Each package must specify either `tag` OR `pattern`, but not both.
+
+### Tag Lists
+
+Give `tag` a list to follow several tags and take the newest. Each entry is resolved with
+`npm view`, and the highest version by semver is installed, so a stable release beats an
+older prerelease (`2.5.0` over `2.5.0-beta.3`). Entries that don't resolve are skipped with a
+warning; if none resolve, the run fails.
+
+```json
+{
+  "name": "homebridge-config-ui-x",
+  "tag": ["alpha", "beta"]
+}
+```
 
 ### Pattern Examples
 
