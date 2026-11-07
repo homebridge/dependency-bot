@@ -114,7 +114,9 @@ jobs:
 |--------|-------------|
 | `changes_detected` | Whether changes were detected in any directories (`true`/`false`) |
 | `changed_dirs` | Comma-separated list of directories with changes |
-| `auto_merge` | Whether auto-merge is enabled (`true`/`false`) |
+| `auto_merge` | Whether changes land without review (`true`/`false`); always `true` with `update_method: push` |
+| `update_method` | `pr` or `push` |
+| `commit_sha` | The commit pushed to the base branch (`push` only) |
 | `branch_name` | The name of the branch created (if changes detected) |
 | `pr_number` | The number of the pull request created (if changes detected) |
 
@@ -248,6 +250,7 @@ Create a configuration file (default: `.github/homebridge-dependency-bot.json`) 
 | `git_user.name` | Name for Git commits | No | `"Homebridge Dependency Bot"` |
 | `git_user.email` | Email for Git commits | No | `"actions@github.com"` |
 | `auto_merge` | Enable automatic PR approval and merge | No | `false` |
+| `update_method` | `"pr"` opens a pull request (merged automatically if `auto_merge` is true). `"push"` commits straight to the checked-out branch with `GH_TOKEN`, with no PR; the `auto_merge` output is then `true` | No | `"pr"` |
 | `directories` | Array of directories to process | Yes | - |
 | `directories[].directory` | Path to directory containing package.json | Yes | - |
 | `directories[].packages` | Array of packages to update | Yes | - |
@@ -256,6 +259,24 @@ Create a configuration file (default: `.github/homebridge-dependency-bot.json`) 
 | `directories[].packages[].pattern` | Regex pattern to match versions | No* | - |
 
 *Note: Each package must specify either `tag` OR `pattern`, but not both.
+
+### Direct Push
+
+Set `"update_method": "push"` to commit updates straight to the branch the workflow checked out
+(normally the default branch) instead of opening a pull request. This avoids a PR, an approval
+and a merge for every update, and the notifications that come with them.
+
+- `GH_TOKEN` must be allowed to push to that branch. If it is protected, the token's owner (or
+  app) needs to be able to bypass the protection.
+- If the push is rejected because the branch moved, the bot rebases and retries, up to 3 times.
+- The `auto_merge` output is `true`, so workflows that trigger a build on `auto_merge` keep working.
+- The commit message is `<STREAM>: Update <stream> dependencies in <dirs>`.
+
+### Job Summary
+
+Every run writes a table to the GitHub job summary: each dependency whose version changed, its
+old and new version, and where the new version came from (for a tag list, which tag won). It
+ends with the outcome: no changes, PR merged, or the pushed commit.
 
 ### Tag Lists
 
