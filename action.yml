@@ -122,15 +122,16 @@ runs:
                 candidates=()
                 while IFS= read -r t; do
                   v=$(npm view "$pkg@$t" version --json 2>/dev/null | jq -r 'if type == "array" then .[-1] elif type == "string" then . else empty end' 2>/dev/null)
-                  if [ -n "$v" ]; then
-                    candidates+=("$v")
-                    echo "$pkg@$t resolves to $v"
-                  else
-                    echo "::warning::$pkg@$t did not resolve to a version"
+                  # Strict: a typo or npm hiccup must not silently pick an older version
+                  if [ -z "$v" ]; then
+                    echo "::error::$pkg@$t did not resolve to a version"
+                    exit 1
                   fi
+                  candidates+=("$v")
+                  echo "$pkg@$t resolves to $v"
                 done < <(jq -r ".directories[$i].packages[$j].tag[]" "$config")
                 if [ ${#candidates[@]} -eq 0 ]; then
-                  echo "::error::None of the tags for $pkg resolved to a version"
+                  echo "::error::The tag list for $pkg is empty"
                   exit 1
                 fi
                 tag=$(npx -y semver@7 "${candidates[@]}" | tail -n 1)

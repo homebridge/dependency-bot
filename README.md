@@ -261,8 +261,9 @@ Create a configuration file (default: `.github/homebridge-dependency-bot.json`) 
 
 Give `tag` a list to follow several tags and take the newest. Each entry is resolved with
 `npm view`, and the highest version by semver is installed, so a stable release beats an
-older prerelease (`2.5.0` over `2.5.0-beta.3`). Entries that don't resolve are skipped with a
-warning; if none resolve, the run fails.
+older prerelease (`2.5.0` over `2.5.0-beta.3`). If any entry doesn't resolve (a typo, a removed
+tag, or npm being unavailable), the run fails rather than picking from the rest, so a bad lookup
+can never install an older version.
 
 ```json
 {
