@@ -28,8 +28,14 @@ outputs:
     description: 'Comma-separated list of directories with changes'
     value: ${{ steps.check-changes.outputs.changed_dirs }}
   auto_merge:
-    description: 'Whether auto-merge is enabled'
+    description: 'Whether changes land on the base branch without review (true for auto_merge PRs and for update_method push)'
     value: ${{ steps.load-config.outputs.auto_merge }}
+  update_method:
+    description: 'How changes are applied: pr or push'
+    value: ${{ steps.load-config.outputs.update_method }}
+  commit_sha:
+    description: 'The commit pushed to the base branch (update_method push only)'
+    value: ${{ steps.push-changes.outputs.commit_sha }}
   branch_name:
     description: 'The name of the branch created'
     value: ${{ steps.create-branch.outputs.branch_name }}
@@ -64,6 +70,15 @@ runs:
           user_name=$(jq -r '.git_user.name // "Homebridge Dependency Bot"' "$config_abs")
           user_email=$(jq -r '.git_user.email // "actions@github.com"' "$config_abs")
           auto_merge=$(jq -r '.auto_merge // false' "$config_abs")
+          update_method=$(jq -r '.update_method // "pr"' "$config_abs")
+          if [ "$update_method" != "pr" ] && [ "$update_method" != "push" ]; then
+            echo "::error::update_method must be \"pr\" or \"push\", got \"$update_method\""
+            exit 1
+          fi
+          if [ "$update_method" = "push" ]; then
+            # A direct push lands without review, so downstream treats it like an auto-merged PR
+            auto_merge=true
+          fi
           dirs_length=$(jq '.directories | length' "$config_abs")
           for i in $(seq 0 $(($dirs_length - 1))); do
             pkgs_length=$(jq ".directories[$i].packages | length" "$config_abs")
@@ -86,6 +101,7 @@ runs:
           echo "user_name=$user_name" >> $GITHUB_OUTPUT
           echo "user_email=$user_email" >> $GITHUB_OUTPUT
           echo "auto_merge=$auto_merge" >> $GITHUB_OUTPUT
+          echo "update_method=$update_method" >> $GITHUB_OUTPUT
           echo "dirs_length=$dirs_length" >> $GITHUB_OUTPUT
 
     - name: Configure Git identity - ${{ steps.load-config.outputs.user_name }}
@@ -101,6 +117,8 @@ runs:
       run: |
           config="${{ steps.load-config.outputs.config_abs }}"
           dirs_length="${{ steps.load-config.outputs.dirs_length }}"
+          sources="$RUNNER_TEMP/dependency-bot-sources.tsv"
+          : > "$sources"
           echo "Found $dirs_length directories in config"
           for i in $(seq 0 $(($dirs_length - 1))); do
             dir=$(jq -r ".directories[$i].directory" "$config")
@@ -120,6 +138,7 @@ runs:
               # (semver, not sort -V: sort -V ranks 2.5.0-beta.3 above 2.5.0).
               if [ "$(jq -r ".directories[$i].packages[$j].tag | type" "$config")" = "array" ]; then
                 candidates=()
+                sources_list=()
                 while IFS= read -r t; do
                   v=$(npm view "$pkg@$t" version --json 2>/dev/null | jq -r 'if type == "array" then .[-1] elif type == "string" then . else empty end' 2>/dev/null)
                   # Strict: a typo or npm hiccup must not silently pick an older version
@@ -128,6 +147,7 @@ runs:
                     exit 1
                   fi
                   candidates+=("$v")
+                  sources_list+=("$t=$v")
                   echo "$pkg@$t resolves to $v"
                 done < <(jq -r ".directories[$i].packages[$j].tag[]" "$config")
                 if [ ${#candidates[@]} -eq 0 ]; then
@@ -140,6 +160,14 @@ runs:
                   exit 1
                 fi
                 echo "::notice::$pkg: picked $tag from [${candidates[*]}]"
+                winner=""
+                for sv in "${sources_list[@]}"; do [ "${sv#*=}" = "$tag" ] && winner="${winner:+$winner, }${sv%%=*}"; done
+                all_tags=$(jq -r ".directories[$i].packages[$j].tag | join(\", \")" "$config")
+                printf '%s\t%s\t%s\n' "$dir" "$pkg" "\`$winner\` (of $all_tags)" >> "$sources"
+              elif [ "$tag" != "null" ]; then
+                printf '%s\t%s\t%s\n' "$dir" "$pkg" "\`$tag\`" >> "$sources"
+              else
+                printf '%s\t%s\t%s\n' "$dir" "$pkg" "pattern \`$pattern\`" >> "$sources"
               fi
               if [ "$tag" != "null" ]; then
                 echo "::notice::Installing $pkg@$tag in $dir"
@@ -167,6 +195,7 @@ runs:
           dirs_length="${{ steps.load-config.outputs.dirs_length }}"
           changes_detected=false
           changed_dirs=""
+          : > "$RUNNER_TEMP/dependency-bot-summary.md"
           for i in $(seq 0 $(($dirs_length - 1))); do
             dir=$(jq -r ".directories[$i].directory" "$config")
             if [ ! -d "$dir" ]; then
@@ -178,6 +207,14 @@ runs:
             else
               echo "Changes detected in $dir"
               changes_detected=true
+              # Summary rows: one per dependency whose version changed
+              while IFS=$'\t' read -r name old new; do
+                src=$(awk -F'\t' -v d="$dir" -v n="$name" '$1==d && $2==n {print $3}' "$RUNNER_TEMP/dependency-bot-sources.tsv")
+                printf '| %s | %s | %s | **%s** | %s |\n' "$dir" "$name" "${old:-—}" "${new:-—}" "${src:-—}" >> "$RUNNER_TEMP/dependency-bot-summary.md"
+              done < <(jq -rn --slurpfile a <(git show "HEAD:$dir/package.json" 2>/dev/null || echo '{}') --slurpfile b package.json \
+                '($a[0].dependencies // {}) as $o | ($b[0].dependencies // {}) as $n
+                 | ([$o, $n] | map(keys) | add | unique)[] as $k
+                 | select($o[$k] != $n[$k]) | [$k, ($o[$k] // ""), ($n[$k] // "")] | @tsv')
               if [ -z "$changed_dirs" ]; then
                 changed_dirs="$dir"
               else
@@ -195,9 +232,45 @@ runs:
           echo "changes_detected=$changes_detected" >> $GITHUB_OUTPUT
           echo "changed_dirs=$changed_dirs" >> $GITHUB_OUTPUT
 
+    - name: Push changes to the base branch
+      id: push-changes
+      if: steps.check-changes.outputs.changes_detected == 'true' && steps.load-config.outputs.update_method == 'push'
+      shell: bash
+      run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::update_method push needs GH_TOKEN: a token allowed to push to the protected base branch"
+            exit 1
+          fi
+          changed_dirs="${{ steps.check-changes.outputs.changed_dirs }}"
+          release_stream="${{ inputs.release_stream }}"
+          release_stream_upper=$(echo "$release_stream" | tr '[:lower:]' '[:upper:]')
+          base=$(git rev-parse --abbrev-ref HEAD)
+          if [ "$base" = "HEAD" ]; then
+            echo "::error::The checkout is not on a branch, so there is no base branch to push to"
+            exit 1
+          fi
+          git commit -m "$release_stream_upper: Update $release_stream dependencies in $changed_dirs"
+          # actions/checkout stores github.token as an auth header, which would override GH_TOKEN
+          git config --local --unset-all "http.https://github.com/.extraheader" || true
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          for attempt in 1 2 3; do
+            if git push "$remote" "HEAD:refs/heads/$base"; then
+              sha=$(git rev-parse HEAD)
+              echo "::notice::Pushed $sha to $base"
+              echo "commit_sha=$sha" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "::warning::Push to $base rejected (attempt $attempt): rebasing onto the new $base and retrying"
+            git pull --rebase "$remote" "$base" || { echo "::error::Rebase onto $base failed"; exit 1; }
+          done
+          echo "::error::Could not push to $base after 3 attempts"
+          exit 1
+      env:
+        GH_TOKEN: ${{ inputs.GH_TOKEN }}
+
     - name: Create and push branch
       id: create-branch
-      if: steps.check-changes.outputs.changes_detected == 'true'
+      if: steps.check-changes.outputs.changes_detected == 'true' && steps.load-config.outputs.update_method == 'pr'
       shell: bash
       run: |
           changed_dirs="${{ steps.check-changes.outputs.changed_dirs }}"
@@ -213,7 +286,7 @@ runs:
 
     - name: Create pull request from ${{ steps.create-branch.outputs.branch_name }}
       id: create-pr
-      if: steps.check-changes.outputs.changes_detected == 'true'
+      if: steps.check-changes.outputs.changes_detected == 'true' && steps.load-config.outputs.update_method == 'pr'
       shell: bash
       run: |
           branch="${{ steps.create-branch.outputs.branch_name }}"
@@ -253,7 +326,7 @@ runs:
 
     - name: Approve pull request - ${{ steps.create-pr.outputs.pr_number }}
       id: approve-pr
-      if: steps.check-changes.outputs.changes_detected == 'true' && steps.load-config.outputs.auto_merge == 'true'
+      if: steps.check-changes.outputs.changes_detected == 'true' && steps.load-config.outputs.auto_merge == 'true' && steps.load-config.outputs.update_method == 'pr'
       shell: bash
       run: |
         pr_number="${{ steps.create-pr.outputs.pr_number }}"
@@ -264,7 +337,7 @@ runs:
         
     - name: Auto-merge PR - ${{ steps.create-pr.outputs.pr_number }}
       id: auto-merge
-      if: steps.check-changes.outputs.changes_detected == 'true' && steps.load-config.outputs.auto_merge == 'true'
+      if: steps.check-changes.outputs.changes_detected == 'true' && steps.load-config.outputs.auto_merge == 'true' && steps.load-config.outputs.update_method == 'pr'
       shell: bash
       run: |
         pr_number="${{ steps.create-pr.outputs.pr_number }}"
@@ -295,3 +368,43 @@ runs:
         echo "::endgroup::"
       env:
         GH_TOKEN: ${{ inputs.GH_TOKEN }}
+
+    - name: Write job summary
+      if: always() && steps.load-config.outcome == 'success'
+      shell: bash
+      run: |
+          release_stream="${{ inputs.release_stream }}"
+          rows="$RUNNER_TEMP/dependency-bot-summary.md"
+          {
+            echo "### 🤖 Dependency bot: $release_stream"
+            echo
+            if [ "${{ steps.check-changes.outputs.changes_detected }}" = "true" ] && [ -s "$rows" ]; then
+              echo "| Directory | Package | Was | Now | Source |"
+              echo "|---|---|---|---|---|"
+              cat "$rows"
+              echo
+            fi
+            if [ "${{ steps.process-dirs.outcome }}" != "success" ] || [ "${{ steps.check-changes.outcome }}" != "success" ]; then
+              echo "❌ Failed while resolving versions; nothing was changed. See the step log."
+            elif [ "${{ steps.check-changes.outputs.changes_detected }}" != "true" ]; then
+              echo "No changes."
+            elif [ "${{ steps.load-config.outputs.update_method }}" = "push" ]; then
+              if [ "${{ steps.push-changes.outcome }}" = "success" ]; then
+                sha="${{ steps.push-changes.outputs.commit_sha }}"
+                echo "✅ Pushed [\`${sha:0:7}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/$sha)."
+              else
+                echo "❌ Push failed. See the step log."
+              fi
+            else
+              pr="${{ steps.create-pr.outputs.pr_number }}"
+              if [ -z "$pr" ]; then
+                echo "❌ Pull request was not created. See the step log."
+              elif [ "${{ steps.auto-merge.outcome }}" = "success" ]; then
+                echo "✅ Pull request #$pr merged."
+              elif [ "${{ steps.load-config.outputs.auto_merge }}" = "true" ]; then
+                echo "❌ Pull request #$pr was not merged. See the step log."
+              else
+                echo "Pull request #$pr opened for review."
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
