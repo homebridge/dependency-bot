@@ -324,13 +324,15 @@ runs:
 
           git commit -m "$release_stream_upper: Update $release_stream dependencies in $changed_dirs"
 
-          # actions/checkout stores github.token as an auth header, which would override the explicit publish token.
-          git config --local --unset-all "http.https\://github.com/.extraheader" || true
+          # actions/checkout persists github.token as an auth header, which would override the explicit publish token.
+          # checkout v6 keeps that header in an included file, so it cannot be removed with git config --local.
+          # An empty extraheader clears the inherited value for these commands only.
+          clear_checkout_auth=(-c "http.https://github.com/.extraheader=")
 
           remote="https://x-access-token:${PUBLISH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
           for attempt in 1 2 3; do
-            if push_output=$(git push "$remote" "HEAD:refs/heads/$base" 2>&1); then
+            if push_output=$(git "${clear_checkout_auth[@]}" push "$remote" "HEAD:refs/heads/$base" 2>&1); then
               echo "$push_output"
 
               sha=$(git rev-parse HEAD)
@@ -354,7 +356,7 @@ runs:
 
               echo "::warning::Push to $base failed (attempt $attempt); rebasing onto the latest $base and retrying"
 
-              git pull --rebase "$remote" "$base" || {
+              git "${clear_checkout_auth[@]}" pull --rebase "$remote" "$base" || {
                 echo "::error::Rebase onto $base failed"
                 exit 1
               }
