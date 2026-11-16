@@ -293,7 +293,8 @@ runs:
                 jq -rn \
                   --slurpfile a <(git show "HEAD:$dir/package.json" 2>/dev/null || echo '{}') \
                   --slurpfile b package.json \
-                  '($a[0].dependencies // {}) as $o | ($b[0].dependencies // {}) as $n
+                  '(($a[0].dependencies // {}) + ($a[0].devDependencies // {})) as $o
+                  | (($b[0].dependencies // {}) + ($b[0].devDependencies // {})) as $n
                   | ([$o, $n] | map(keys) | add | unique)[] as $k
                   | select($o[$k] != $n[$k]) | [$k, ($o[$k] // ""), ($n[$k] // "")] | @tsv'
               )
