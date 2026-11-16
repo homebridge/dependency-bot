@@ -240,6 +240,15 @@ runs:
               fi
             done
 
+            # Optional: refresh package-lock.json to match the bumped package.json.
+            if [ "$(jq -r ".directories[$i].update_lockfile // .update_lockfile // false" "$config")" = "true" ] && [ -f package-lock.json ]; then
+              echo "::notice::Updating package-lock.json in $dir"
+              npm install --package-lock-only --ignore-scripts || {
+                echo "::error::Failed to update package-lock.json in $dir"
+                exit 1
+              }
+            fi
+
             cd - > /dev/null
             echo "Completed processing $dir"
           done
@@ -294,6 +303,10 @@ runs:
               fi
 
               git add package.json
+
+              if [ "$(jq -r ".directories[$i].update_lockfile // .update_lockfile // false" "$config")" = "true" ] && [ -f package-lock.json ]; then
+                git add package-lock.json
+              fi
             fi
 
             cd - > /dev/null
