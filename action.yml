@@ -89,6 +89,7 @@ runs:
           user_email=$(jq -r '.git_user.email // "actions@github.com"' "$config_abs")
           auto_merge=$(jq -r '.auto_merge // false' "$config_abs")
           update_method=$(jq -r '.update_method // "pr"' "$config_abs")
+          merge_when_green=$(jq -r '.merge_when_green // false' "$config_abs")
 
           if [ "$update_method" != "pr" ] && [ "$update_method" != "push" ]; then
             echo "::error::update_method must be \"pr\" or \"push\", got \"$update_method\""
@@ -128,6 +129,7 @@ runs:
           echo "user_email=$user_email" >> "$GITHUB_OUTPUT"
           echo "auto_merge=$auto_merge" >> "$GITHUB_OUTPUT"
           echo "update_method=$update_method" >> "$GITHUB_OUTPUT"
+          echo "merge_when_green=$merge_when_green" >> "$GITHUB_OUTPUT"
           echo "dirs_length=$dirs_length" >> "$GITHUB_OUTPUT"
 
     - name: Configure Git identity - ${{ steps.load-config.outputs.user_name }}
@@ -501,8 +503,16 @@ runs:
           echo "::warning::To fix this, provide a personal access token or GitHub App token with pull_requests:write permission."
         fi
 
+        if [ "$MERGE_WHEN_GREEN" = "true" ]; then
+          # Enable auto-merge: GitHub merges once the required checks pass.
+          echo "::notice::Enabling auto-merge for PR #$pr_number (merges when required checks pass)"
+          merge_cmd=(env "GH_TOKEN=${AUTO_MERGE_TOKEN:-$GH_TOKEN}" gh pr merge "$pr_number" --auto --squash --delete-branch)
+        else
+          merge_cmd=(gh pr merge "$pr_number" --squash --delete-branch)
+        fi
+
         # Attempt merge with better error handling.
-        if ! gh pr merge "$pr_number" --squash --delete-branch; then
+        if ! "${merge_cmd[@]}"; then
           echo "::error::Failed to merge PR #$pr_number"
           echo "::error::This usually happens when the token lacks pull_requests:write permission."
           echo "::error::Possible solutions:"
@@ -516,6 +526,8 @@ runs:
         echo "::endgroup::"
       env:
         GH_TOKEN: ${{ inputs.GH_TOKEN }}
+        AUTO_MERGE_TOKEN: ${{ inputs.PUBLISH_TOKEN || inputs.GH_TOKEN }}
+        MERGE_WHEN_GREEN: ${{ steps.load-config.outputs.merge_when_green }}
 
     - name: Write job summary
       if: always() && steps.load-config.outcome == 'success'
@@ -554,6 +566,8 @@ runs:
 
               if [ -z "$pr" ]; then
                 echo "❌ Pull request was not created. See the step log."
+              elif [ "${{ steps.auto-merge.outcome }}" = "success" ] && [ "${{ steps.load-config.outputs.merge_when_green }}" = "true" ]; then
+                echo "✅ Pull request #$pr: auto-merge enabled; merges when required checks pass."
               elif [ "${{ steps.auto-merge.outcome }}" = "success" ]; then
                 echo "✅ Pull request #$pr merged."
               elif [ "${{ steps.load-config.outputs.auto_merge }}" = "true" ]; then
