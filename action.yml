@@ -476,7 +476,7 @@ runs:
 
     - name: Approve pull request - ${{ steps.create-pr.outputs.pr_number }}
       id: approve-pr
-      if: steps.check-changes.outputs.changes_detected == 'true' && steps.load-config.outputs.auto_merge == 'true' && steps.load-config.outputs.update_method == 'pr'
+      if: steps.check-changes.outputs.changes_detected == 'true' && steps.load-config.outputs.auto_merge == 'true' && steps.load-config.outputs.update_method == 'pr' && inputs.GH_TOKEN != ''
       shell: bash
       run: |
         pr_number="${{ steps.create-pr.outputs.pr_number }}"
