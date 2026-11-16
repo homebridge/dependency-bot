@@ -20,6 +20,11 @@ inputs:
     description: 'GitHub token used for direct pushes to the protected base branch. Falls back to GH_TOKEN when not supplied.'
     required: false
 
+  base_branch:
+    description: 'Branch to check out, open the PR against, or push to (e.g. beta-5.30.2). Empty keeps the default: the branch the workflow was triggered on.'
+    required: false
+    default: ''
+
 outputs:
   changes_detected:
     description: 'Whether changes were detected in any directories'
@@ -55,6 +60,7 @@ runs:
     - uses: actions/checkout@v7
       with:
         token: ${{ github.token }}
+        ref: ${{ inputs.base_branch }}
         fetch-depth: 0
 
     - uses: actions/setup-node@v7
@@ -423,7 +429,13 @@ runs:
           \`\`\`"
           done
 
+          base_args=()
+          if [ -n "$BASE_BRANCH" ]; then
+            base_args=(--base "$BASE_BRANCH")
+          fi
+
           pr_url=$(gh pr create \
+            "${base_args[@]}" \
             --title "$release_stream_upper: Update $release_stream dependencies in $changed_dirs" \
             --body "$pr_body" \
             --label "$release_stream")
@@ -435,6 +447,7 @@ runs:
           echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
       env:
         GITHUB_TOKEN: ${{ github.token }}
+        BASE_BRANCH: ${{ inputs.base_branch }}
 
     - name: Approve pull request - ${{ steps.create-pr.outputs.pr_number }}
       id: approve-pr
