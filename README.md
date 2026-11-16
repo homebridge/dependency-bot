@@ -109,6 +109,7 @@ jobs:
 | `GH_TOKEN` | GitHub token with PR approval permissions (see Token Handling section). When empty, the approve step is skipped | No | - |
 | `PUBLISH_TOKEN` | Token used to push (`update_method: push`), and in PR mode to push the PR branch and create the PR. Falls back to `GH_TOKEN` | No | - |
 | `base_branch` | Branch to check out, open the PR against, or push to (e.g. `beta-5.30.2`). Empty keeps the default: the branch the workflow ran on | No | empty |
+| `branch_pattern` | Glob for the branch to work on (e.g. `beta-*.*.*`). The highest matching branch by version is used; if none matches, the action does nothing and sets `skipped`. Cannot be combined with `base_branch` | No | empty |
 
 ## Outputs
 
@@ -121,6 +122,8 @@ jobs:
 | `commit_sha` | The commit pushed to the base branch (`push` only) |
 | `branch_name` | The name of the branch created (if changes detected) |
 | `pr_number` | The number of the pull request created (if changes detected) |
+| `base_branch` | The branch the action worked on (`base_branch`, the branch matched by `branch_pattern`, or empty for the default) |
+| `skipped` | `true` when no branch matched `branch_pattern`, so nothing ran |
 
 ## Token Handling
 
@@ -280,37 +283,45 @@ and a merge for every update, and the notifications that come with them.
 
 ### Prerelease Branches in PR Mode
 
-Set `base_branch` to run against a branch such as `beta-5.30.2`: the action checks it out and
-opens the PR against it. Use an App token as `PUBLISH_TOKEN` so the PR's CI runs, and set
-`auto_merge` and `merge_when_green` in the config to merge once required checks pass. `GH_TOKEN`
-is optional; leave it out and the approve step is skipped (use this when the branch needs no review).
-Branch names are passed to the scripts through `env`, never interpolated into them.
+Set `branch_pattern` (e.g. `beta-*.*.*`) to run against the highest matching branch, such as
+`beta-5.30.2`: the action checks it out and opens the PR against it. If no branch matches, it
+does nothing, so a scheduled run is harmless between releases and never touches the default
+branch. To name a branch instead, set `base_branch`. Use an App token as `PUBLISH_TOKEN` so the
+PR's CI runs, and set `auto_merge` and `merge_when_green` in the config to merge once required
+checks pass. `GH_TOKEN` is optional; leave it out and the approve step is skipped (use this when
+the branch needs no review). Branch names are passed to the scripts through `env`, never
+interpolated into them.
 
 ```yaml
-name: Update Dependencies (prerelease branch)
+name: Update Prerelease Dependencies
 on:
+  schedule:
+    - cron: '0 9 * * *'
   workflow_dispatch:
-    inputs:
-      branch:
-        description: Prerelease branch, e.g. beta-5.30.2
-        required: true
 
 jobs:
   update:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        stream: [beta, alpha]
     steps:
       - uses: actions/create-github-app-token@v3
         id: app-token
         with:
-          app-id: ${{ vars.APP_ID }}
+          app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
 
-      - uses: homebridge/dependency-bot@latest
+      - uses: homebridge/dependency-bot@v1.1.0
         with:
-          release_stream: beta
-          base_branch: ${{ inputs.branch }}
+          config_file: .github/homebridge-dependency-bot-${{ matrix.stream }}.json
+          release_stream: ${{ matrix.stream }}
+          branch_pattern: ${{ matrix.stream }}-*.*.*
           PUBLISH_TOKEN: ${{ steps.app-token.outputs.token }}
 ```
 
