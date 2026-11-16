@@ -317,7 +317,7 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
-      - uses: homebridge/dependency-bot@v1.1.0
+      - uses: homebridge/dependency-bot@v2.0.0
         with:
           config_file: .github/homebridge-dependency-bot-${{ matrix.stream }}.json
           release_stream: ${{ matrix.stream }}
