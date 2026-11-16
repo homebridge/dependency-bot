@@ -425,6 +425,7 @@ runs:
           changed_dirs="${{ steps.check-changes.outputs.changed_dirs }}"
           release_stream="${{ inputs.release_stream }}"
           release_stream_upper=$(echo "$release_stream" | tr '[:lower:]' '[:upper:]')
+          diff_base="origin/${BASE_BRANCH:-latest}"
 
           # Build PR body with details of changes.
           pr_body="Automated dependency update for $release_stream.
@@ -441,7 +442,7 @@ runs:
           \`\`\`diff"
 
             # Only include changed lines (lines starting with + or - but not the diff header).
-            diff_output=$(git --no-pager diff "origin/latest...$branch" -- "$dir/package.json" | grep -E '^\+|^-' | grep -vE '^(\+\+\+|---)')
+            diff_output=$(git --no-pager diff "$diff_base...$branch" -- "$dir/package.json" | grep -E '^\+|^-' | grep -vE '^(\+\+\+|---)')
 
             # Fallback to previous commit if needed.
             if [ -z "$diff_output" ]; then
