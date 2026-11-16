@@ -20,7 +20,25 @@ inputs:
     description: 'GitHub token used for direct pushes to the protected base branch. Falls back to GH_TOKEN when not supplied.'
     required: false
 
+  base_branch:
+    description: 'Branch to check out, open the PR against, or push to (e.g. beta-5.30.2). Empty keeps the default: the branch the workflow was triggered on.'
+    required: false
+    default: ''
+
+  branch_pattern:
+    description: 'Glob for the branch to work on (e.g. beta-*.*.*). The highest matching branch by version is used; if none matches, the action does nothing. Cannot be combined with base_branch.'
+    required: false
+    default: ''
+
 outputs:
+  base_branch:
+    description: 'The branch the action worked on: base_branch, the branch matched by branch_pattern, or empty for the default'
+    value: ${{ steps.resolve-branch.outputs.branch }}
+
+  skipped:
+    description: 'Whether the action did nothing because no branch matched branch_pattern (true/false)'
+    value: ${{ steps.resolve-branch.outputs.skip }}
+
   changes_detected:
     description: 'Whether changes were detected in any directories'
     value: ${{ steps.check-changes.outputs.changes_detected }}
@@ -52,21 +70,77 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Resolve base branch
+      id: resolve-branch
+      shell: bash
+      run: |
+          if [ -n "$BASE_BRANCH" ] && [ -n "$BRANCH_PATTERN" ]; then
+            echo "::error::Set base_branch or branch_pattern, not both"
+            exit 1
+          fi
+
+          if [ -z "$BRANCH_PATTERN" ]; then
+            echo "branch=$BASE_BRANCH" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # List branches sharing the pattern's literal prefix, then glob-match them.
+          prefix="${BRANCH_PATTERN%%[*?[]*}"
+          names=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/${prefix}" --jq '.[].ref | sub("^refs/heads/"; "")') || {
+            echo "::error::Could not list branches matching ${prefix}*"
+            exit 1
+          }
+
+          matches=()
+          while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            # Unquoted on purpose: BRANCH_PATTERN is a glob.
+            [[ "$name" == $BRANCH_PATTERN ]] && matches+=("$name")
+          done <<< "$names"
+
+          if [ ${#matches[@]} -eq 0 ]; then
+            echo "::notice::No branch matches $BRANCH_PATTERN; nothing to do"
+            echo "branch=" >> "$GITHUB_OUTPUT"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "### 🤖 Dependency bot: ${RELEASE_STREAM}"
+              echo
+              echo "No branch matches \`${BRANCH_PATTERN}\`; nothing to do."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          branch=$(printf '%s\n' "${matches[@]}" | sort -V | tail -n 1)
+          echo "::notice::Using branch $branch (highest of ${#matches[@]} matching $BRANCH_PATTERN)"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+      env:
+        BASE_BRANCH: ${{ inputs.base_branch }}
+        BRANCH_PATTERN: ${{ inputs.branch_pattern }}
+        RELEASE_STREAM: ${{ inputs.release_stream }}
+        GH_TOKEN: ${{ github.token }}
+
     - uses: actions/checkout@v7
+      if: steps.resolve-branch.outputs.skip != 'true'
       with:
         token: ${{ github.token }}
+        ref: ${{ steps.resolve-branch.outputs.branch }}
         fetch-depth: 0
 
     - uses: actions/setup-node@v7
+      if: steps.resolve-branch.outputs.skip != 'true'
       with:
         node-version: 'lts/*'
 
     - name: Install jq
+      if: steps.resolve-branch.outputs.skip != 'true'
       shell: bash
       run: sudo apt-get install -y jq
 
     - name: Load config file - ${{ inputs.config_file }}
       id: load-config
+      if: steps.resolve-branch.outputs.skip != 'true'
       shell: bash
       run: |
           echo "::group::🤖 homebridge ${{ inputs.release_stream }} Dependency Bot - Update Dependencies"
@@ -83,6 +157,7 @@ runs:
           user_email=$(jq -r '.git_user.email // "actions@github.com"' "$config_abs")
           auto_merge=$(jq -r '.auto_merge // false' "$config_abs")
           update_method=$(jq -r '.update_method // "pr"' "$config_abs")
+          merge_when_green=$(jq -r '.merge_when_green // false' "$config_abs")
 
           if [ "$update_method" != "pr" ] && [ "$update_method" != "push" ]; then
             echo "::error::update_method must be \"pr\" or \"push\", got \"$update_method\""
@@ -122,9 +197,11 @@ runs:
           echo "user_email=$user_email" >> "$GITHUB_OUTPUT"
           echo "auto_merge=$auto_merge" >> "$GITHUB_OUTPUT"
           echo "update_method=$update_method" >> "$GITHUB_OUTPUT"
+          echo "merge_when_green=$merge_when_green" >> "$GITHUB_OUTPUT"
           echo "dirs_length=$dirs_length" >> "$GITHUB_OUTPUT"
 
     - name: Configure Git identity - ${{ steps.load-config.outputs.user_name }}
+      if: steps.resolve-branch.outputs.skip != 'true'
       shell: bash
       run: |
           git config user.name "${{ steps.load-config.outputs.user_name }}"
@@ -133,6 +210,7 @@ runs:
 
     - name: Process directories and packages
       id: process-dirs
+      if: steps.resolve-branch.outputs.skip != 'true'
       shell: bash
       run: |
           config="${{ steps.load-config.outputs.config_abs }}"
@@ -234,12 +312,22 @@ runs:
               fi
             done
 
+            # Optional: refresh package-lock.json to match the bumped package.json.
+            if [ "$(jq -r ".directories[$i].update_lockfile // .update_lockfile // false" "$config")" = "true" ] && [ -f package-lock.json ]; then
+              echo "::notice::Updating package-lock.json in $dir"
+              npm install --package-lock-only --ignore-scripts || {
+                echo "::error::Failed to update package-lock.json in $dir"
+                exit 1
+              }
+            fi
+
             cd - > /dev/null
             echo "Completed processing $dir"
           done
 
     - name: Check for changes
       id: check-changes
+      if: steps.resolve-branch.outputs.skip != 'true'
       shell: bash
       run: |
           config="${{ steps.load-config.outputs.config_abs }}"
@@ -276,7 +364,8 @@ runs:
                 jq -rn \
                   --slurpfile a <(git show "HEAD:$dir/package.json" 2>/dev/null || echo '{}') \
                   --slurpfile b package.json \
-                  '($a[0].dependencies // {}) as $o | ($b[0].dependencies // {}) as $n
+                  '(($a[0].dependencies // {}) + ($a[0].devDependencies // {})) as $o
+                  | (($b[0].dependencies // {}) + ($b[0].devDependencies // {})) as $n
                   | ([$o, $n] | map(keys) | add | unique)[] as $k
                   | select($o[$k] != $n[$k]) | [$k, ($o[$k] // ""), ($n[$k] // "")] | @tsv'
               )
@@ -288,6 +377,10 @@ runs:
               fi
 
               git add package.json
+
+              if [ "$(jq -r ".directories[$i].update_lockfile // .update_lockfile // false" "$config")" = "true" ] && [ -f package-lock.json ]; then
+                git add package-lock.json
+              fi
             fi
 
             cd - > /dev/null
@@ -379,12 +472,21 @@ runs:
 
           git checkout -b "$branch"
           git commit -m "Update $release_stream dependencies in $changed_dirs"
-          git push origin "$branch"
+
+          if [ -n "$PUBLISH_TOKEN" ]; then
+            # Events made with GITHUB_TOKEN do not trigger workflows, so push with the App token
+            # so the PR's CI runs. An empty extraheader clears the checkout's github.token header.
+            git -c "http.https://github.com/.extraheader=" push \
+              "https://x-access-token:${PUBLISH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$branch"
+          else
+            git push origin "$branch"
+          fi
 
           echo "::notice::Branch pushed: $branch"
           echo "branch_name=$branch" >> "$GITHUB_OUTPUT"
       env:
         GITHUB_TOKEN: ${{ github.token }}
+        PUBLISH_TOKEN: ${{ inputs.PUBLISH_TOKEN || inputs.GH_TOKEN }}
 
     - name: Create pull request from ${{ steps.create-branch.outputs.branch_name }}
       id: create-pr
@@ -395,6 +497,7 @@ runs:
           changed_dirs="${{ steps.check-changes.outputs.changed_dirs }}"
           release_stream="${{ inputs.release_stream }}"
           release_stream_upper=$(echo "$release_stream" | tr '[:lower:]' '[:upper:]')
+          diff_base="origin/${BASE_BRANCH:-latest}"
 
           # Build PR body with details of changes.
           pr_body="Automated dependency update for $release_stream.
@@ -411,7 +514,7 @@ runs:
           \`\`\`diff"
 
             # Only include changed lines (lines starting with + or - but not the diff header).
-            diff_output=$(git --no-pager diff "origin/latest...$branch" -- "$dir/package.json" | grep -E '^\+|^-' | grep -vE '^(\+\+\+|---)')
+            diff_output=$(git --no-pager diff "$diff_base...$branch" -- "$dir/package.json" | grep -E '^\+|^-' | grep -vE '^(\+\+\+|---)')
 
             # Fallback to previous commit if needed.
             if [ -z "$diff_output" ]; then
@@ -423,7 +526,13 @@ runs:
           \`\`\`"
           done
 
+          base_args=()
+          if [ -n "$BASE_BRANCH" ]; then
+            base_args=(--base "$BASE_BRANCH")
+          fi
+
           pr_url=$(gh pr create \
+            "${base_args[@]}" \
             --title "$release_stream_upper: Update $release_stream dependencies in $changed_dirs" \
             --body "$pr_body" \
             --label "$release_stream")
@@ -435,10 +544,12 @@ runs:
           echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
       env:
         GITHUB_TOKEN: ${{ github.token }}
+        GH_TOKEN: ${{ inputs.PUBLISH_TOKEN || inputs.GH_TOKEN || github.token }}
+        BASE_BRANCH: ${{ steps.resolve-branch.outputs.branch }}
 
     - name: Approve pull request - ${{ steps.create-pr.outputs.pr_number }}
       id: approve-pr
-      if: steps.check-changes.outputs.changes_detected == 'true' && steps.load-config.outputs.auto_merge == 'true' && steps.load-config.outputs.update_method == 'pr'
+      if: steps.check-changes.outputs.changes_detected == 'true' && steps.load-config.outputs.auto_merge == 'true' && steps.load-config.outputs.update_method == 'pr' && inputs.GH_TOKEN != ''
       shell: bash
       run: |
         pr_number="${{ steps.create-pr.outputs.pr_number }}"
@@ -465,8 +576,16 @@ runs:
           echo "::warning::To fix this, provide a personal access token or GitHub App token with pull_requests:write permission."
         fi
 
+        if [ "$MERGE_WHEN_GREEN" = "true" ]; then
+          # Enable auto-merge: GitHub merges once the required checks pass.
+          echo "::notice::Enabling auto-merge for PR #$pr_number (merges when required checks pass)"
+          merge_cmd=(env "GH_TOKEN=${AUTO_MERGE_TOKEN:-$GH_TOKEN}" gh pr merge "$pr_number" --auto --squash --delete-branch)
+        else
+          merge_cmd=(gh pr merge "$pr_number" --squash --delete-branch)
+        fi
+
         # Attempt merge with better error handling.
-        if ! gh pr merge "$pr_number" --squash --delete-branch; then
+        if ! "${merge_cmd[@]}"; then
           echo "::error::Failed to merge PR #$pr_number"
           echo "::error::This usually happens when the token lacks pull_requests:write permission."
           echo "::error::Possible solutions:"
@@ -480,6 +599,8 @@ runs:
         echo "::endgroup::"
       env:
         GH_TOKEN: ${{ inputs.GH_TOKEN }}
+        AUTO_MERGE_TOKEN: ${{ inputs.PUBLISH_TOKEN || inputs.GH_TOKEN }}
+        MERGE_WHEN_GREEN: ${{ steps.load-config.outputs.merge_when_green }}
 
     - name: Write job summary
       if: always() && steps.load-config.outcome == 'success'
@@ -518,6 +639,8 @@ runs:
 
               if [ -z "$pr" ]; then
                 echo "❌ Pull request was not created. See the step log."
+              elif [ "${{ steps.auto-merge.outcome }}" = "success" ] && [ "${{ steps.load-config.outputs.merge_when_green }}" = "true" ]; then
+                echo "✅ Pull request #$pr: auto-merge enabled; merges when required checks pass."
               elif [ "${{ steps.auto-merge.outcome }}" = "success" ]; then
                 echo "✅ Pull request #$pr merged."
               elif [ "${{ steps.load-config.outputs.auto_merge }}" = "true" ]; then

@@ -106,7 +106,10 @@ jobs:
 |-------|-------------|----------|---------|
 | `config_file` | Path to the dependency bot configuration file | No | `.github/homebridge-dependency-bot.json` |
 | `release_stream` | Release stream to update (beta or alpha) | No | `beta` |
-| `GH_TOKEN` | GitHub token with PR approval permissions (see Token Handling section) | No | Uses `github.token` if not provided |
+| `GH_TOKEN` | GitHub token with PR approval permissions (see Token Handling section). When empty, the approve step is skipped | No | - |
+| `PUBLISH_TOKEN` | Token used to push (`update_method: push`), and in PR mode to push the PR branch and create the PR. Falls back to `GH_TOKEN` | No | - |
+| `base_branch` | Branch to check out, open the PR against, or push to (e.g. `beta-5.30.2`). Empty keeps the default: the branch the workflow ran on | No | empty |
+| `branch_pattern` | Glob for the branch to work on (e.g. `beta-*.*.*`). The highest matching branch by version is used; if none matches, the action does nothing and sets `skipped`. Cannot be combined with `base_branch` | No | empty |
 
 ## Outputs
 
@@ -119,6 +122,8 @@ jobs:
 | `commit_sha` | The commit pushed to the base branch (`push` only) |
 | `branch_name` | The name of the branch created (if changes detected) |
 | `pr_number` | The number of the pull request created (if changes detected) |
+| `base_branch` | The branch the action worked on (`base_branch`, the branch matched by `branch_pattern`, or empty for the default) |
+| `skipped` | `true` when no branch matched `branch_pattern`, so nothing ran |
 
 ## Token Handling
 
@@ -165,8 +170,10 @@ steps:
 ### Token Usage Summary
 
 The action uses tokens for different operations:
-- **Repository operations** (checkout, push, create PR): Always uses `github.token`
-- **PR approval/merge** (approve, merge): Uses `GH_TOKEN` input if provided, fallback to `github.token`
+- **Checkout**: Always uses `github.token`
+- **PR mode, push of the PR branch and PR creation**: Uses `PUBLISH_TOKEN` (or `GH_TOKEN` if that is empty) when either is provided, so the PR's CI runs and a merge triggers downstream workflows. GitHub does not trigger workflows for events made with `github.token`. With neither provided, `github.token` is used as before
+- **PR approval**: Uses `GH_TOKEN`; the step is skipped when `GH_TOKEN` is empty
+- **PR merge**: Uses `GH_TOKEN` (with `merge_when_green`: `PUBLISH_TOKEN`, falling back to `GH_TOKEN`)
 
 ### Required Permissions
 
@@ -250,6 +257,8 @@ Create a configuration file (default: `.github/homebridge-dependency-bot.json`) 
 | `git_user.name` | Name for Git commits | No | `"Homebridge Dependency Bot"` |
 | `git_user.email` | Email for Git commits | No | `"actions@github.com"` |
 | `auto_merge` | Enable automatic PR approval and merge | No | `false` |
+| `merge_when_green` | With `auto_merge`, enable GitHub auto-merge (`gh pr merge --auto --squash`) instead of merging immediately, so the PR merges once required checks pass. The repo needs auto-merge enabled and branch protection with required checks | No | `false` |
+| `update_lockfile` | After installing packages in a directory that has a `package-lock.json`, run `npm install --package-lock-only --ignore-scripts` and commit the lockfile with `package.json`. May be set at top level or per entry in `directories[]` | No | `false` |
 | `update_method` | `"pr"` opens a pull request (merged automatically if `auto_merge` is true). `"push"` commits straight to the checked-out branch with `GH_TOKEN`, with no PR; the `auto_merge` output is then `true` | No | `"pr"` |
 | `directories` | Array of directories to process | Yes | - |
 | `directories[].directory` | Path to directory containing package.json | Yes | - |
@@ -272,11 +281,72 @@ and a merge for every update, and the notifications that come with them.
 - The `auto_merge` output is `true`, so workflows that trigger a build on `auto_merge` keep working.
 - The commit message is `<STREAM>: Update <stream> dependencies in <dirs>`.
 
+### Prerelease Branches in PR Mode
+
+Set `branch_pattern` (e.g. `beta-*.*.*`) to run against the highest matching branch, such as
+`beta-5.30.2`: the action checks it out and opens the PR against it. If no branch matches, it
+does nothing, so a scheduled run is harmless between releases and never touches the default
+branch. To name a branch instead, set `base_branch`. Use an App token as `PUBLISH_TOKEN` so the
+PR's CI runs, and set `auto_merge` and `merge_when_green` in the config to merge once required
+checks pass. `GH_TOKEN` is optional; leave it out and the approve step is skipped (use this when
+the branch needs no review). Branch names are passed to the scripts through `env`, never
+interpolated into them.
+
+```yaml
+name: Update Prerelease Dependencies
+on:
+  schedule:
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        stream: [beta, alpha]
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: homebridge/dependency-bot@v1.1.0
+        with:
+          config_file: .github/homebridge-dependency-bot-${{ matrix.stream }}.json
+          release_stream: ${{ matrix.stream }}
+          branch_pattern: ${{ matrix.stream }}-*.*.*
+          PUBLISH_TOKEN: ${{ steps.app-token.outputs.token }}
+```
+
+with a config like:
+
+```json
+{
+  "update_method": "pr",
+  "auto_merge": true,
+  "merge_when_green": true,
+  "directories": [
+    {
+      "directory": ".",
+      "update_lockfile": true,
+      "packages": [{ "name": "@homebridge/node-pty-prebuilt-multiarch", "tag": "beta" }]
+    }
+  ]
+}
+```
+
 ### Job Summary
 
-Every run writes a table to the GitHub job summary: each dependency whose version changed, its
+Every run writes a table to the GitHub job summary: each dependency or devDependency whose version changed, its
 old and new version, and where the new version came from (for a tag list, which tag won). It
-ends with the outcome: no changes, PR merged, or the pushed commit.
+ends with the outcome: no changes, PR merged (or auto-merge enabled), or the pushed commit.
 
 ### Tag Lists
 
