@@ -106,7 +106,7 @@ jobs:
 |-------|-------------|----------|---------|
 | `config_file` | Path to the dependency bot configuration file | No | `.github/homebridge-dependency-bot.json` |
 | `release_stream` | Release stream to update (beta or alpha) | No | `beta` |
-| `GH_TOKEN` | GitHub token with PR approval permissions (see Token Handling section). When empty, the approve step is skipped | No | Uses `github.token` if not provided |
+| `GH_TOKEN` | GitHub token with PR approval permissions (see Token Handling section). When empty, the approve step is skipped | No | - |
 | `PUBLISH_TOKEN` | Token used to push (`update_method: push`), and in PR mode to push the PR branch and create the PR. Falls back to `GH_TOKEN` | No | - |
 | `base_branch` | Branch to check out, open the PR against, or push to (e.g. `beta-5.30.2`). Empty keeps the default: the branch the workflow ran on | No | empty |
 
