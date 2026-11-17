@@ -532,6 +532,7 @@ runs:
           fi
 
           pr_url=$(gh pr create \
+            --head "$branch" \
             "${base_args[@]}" \
             --title "$release_stream_upper: Update $release_stream dependencies in $changed_dirs" \
             --body "$pr_body" \
