@@ -488,7 +488,7 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}
         PUBLISH_TOKEN: ${{ inputs.PUBLISH_TOKEN || inputs.GH_TOKEN }}
 
-    - name: Create pull request from ${{ steps.create-branch.outputs.branch_name }}
+    - name: Create PR for ${{ steps.resolve-branch.outputs.branch || github.event.repository.default_branch }} branch
       id: create-pr
       if: steps.check-changes.outputs.changes_detected == 'true' && steps.load-config.outputs.update_method == 'pr'
       shell: bash
