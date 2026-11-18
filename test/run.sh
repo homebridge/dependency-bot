@@ -2,7 +2,7 @@
 #
 # Tests for the dependency bot. No network: "npm" and "npx" are fakes that read saved answers.
 #
-# - scripts/resolve-version.sh is run directly.
+# - scripts/resolve-version.sh and scripts/check-downgrade.sh are run directly.
 # - The "Process directories and packages" step of action.yml is taken out of the file and run
 #   as the script it is, in a throw-away folder.
 #
@@ -111,6 +111,31 @@ assert_eq 1 "$STATUS" "nothing matches: exit code 1"
 resolve homebridge nosuchtag
 assert_eq 1 "$STATUS" "an unknown tag: exit code 1"
 
+check() {
+  OUT=$(PATH="$FAKEBIN:$REAL_PATH" "$BASH" "$REPO/scripts/check-downgrade.sh" "$@" 2>&1)
+  STATUS=$?
+}
+
+section "check-downgrade.sh: a version must not go down"
+check homebridge 1.11.4 1.6.1
+assert_eq 1 "$STATUS" "1.11.4 -> 1.6.1 is stopped"
+assert_contains "$OUT" "homebridge would go DOWN from 1.11.4 to 1.6.1" "the message names the package and both versions"
+check homebridge 1.11.4 1.11.4
+assert_eq 0 "$STATUS" "no change passes"
+check homebridge 1.11.3 1.11.4
+assert_eq 0 "$STATUS" "an upgrade passes"
+check homebridge 2.5.1-beta.5 2.5.1
+assert_eq 0 "$STATUS" "a beta moving to its release passes"
+check homebridge 2.5.1-beta.5 2.5.0
+assert_eq 1 "$STATUS" "a beta moving back to the last release is stopped"
+check homebridge "" 1.11.4
+assert_eq 0 "$STATUS" "a package that is not pinned yet passes"
+check homebridge '^1.11.0' 1.6.1
+assert_eq 0 "$STATUS" "a current value that is not a plain version is not compared"
+check homebridge 1.11.4 1.6.1 true
+assert_eq 0 "$STATUS" "allow_downgrade lets it pass"
+assert_contains "$OUT" "::warning::" "and still prints a warning"
+
 # ---- the step of action.yml ------------------------------------------------------------------
 
 # The "run" text of the step, with the two values GitHub fills in replaced by shell variables.
@@ -149,6 +174,19 @@ assert_eq "1.11.4" "$(jq -r .dependencies.homebridge "$PROJECT/legacy/64bit/pack
 section "the action: a list of tags installs the highest of them"
 run_step "$(config '{"name":"homebridge","tag":["beta","latest"]}')" '{"dependencies":{"homebridge":"2.5.0"}}'
 assert_eq "install homebridge@2.5.1-beta.5" "$(cat "$NPM_LOG")" "the beta is newer than latest, so the beta is installed"
+
+section "the action: a lookup that would move a version down stops the run"
+answer 'homebridge@^1.x.x' '["1.5.0","1.6.0","1.6.1"]' # what a wrong lookup once gave
+run_step "$(config '{"name":"homebridge","tag":"^1.x.x"}')" '{"dependencies":{"homebridge":"1.11.4"}}'
+assert_eq 1 "$STATUS" "the step fails"
+assert_eq "" "$(cat "$NPM_LOG")" "nothing is installed"
+assert_eq "1.11.4" "$(jq -r .dependencies.homebridge "$PROJECT/legacy/64bit/package.json")" "package.json still pins 1.11.4"
+assert_contains "$OUT" "homebridge would go DOWN from 1.11.4 to 1.6.1" "the log says why"
+
+section "the action: allow_downgrade lets one package go down"
+run_step "$(config '{"name":"homebridge","tag":"^1.x.x","allow_downgrade":true}')" '{"dependencies":{"homebridge":"1.11.4"}}'
+assert_eq 0 "$STATUS" "the step works"
+assert_eq "install homebridge@1.6.1" "$(cat "$NPM_LOG")" "the lower version is installed"
 
 section "the action: nothing in action.yml lets npm choose from a range"
 # shellcheck disable=SC2016 # the texts below are lines of action.yml, not variables to expand here

@@ -242,6 +242,8 @@ runs:
               tag=$(jq -r ".directories[$i].packages[$j].tag // null" "$config")
               pattern=$(jq -r ".directories[$i].packages[$j].pattern // null" "$config")
 
+              allow_downgrade=$(jq -r ".directories[$i].packages[$j].allow_downgrade // false" "$config")
+
               # Work out ONE exact version first, then install exactly that version.
               # npm is never asked to pick from a range ("npm install pkg@^1.x.x"): it skips
               # versions whose "engines" do not allow the Node.js this action runs on, and that is
@@ -300,6 +302,11 @@ runs:
 
                 printf '%s\t%s\t%s\n' "$dir" "$pkg" "pattern \`$pattern\`" >> "$sources"
               fi
+
+              # Never move a package to a lower version than the one pinned now, unless the config
+              # says so for this package ("allow_downgrade": true).
+              current=$(jq -r --arg p "$pkg" '(.dependencies // {})[$p] // (.devDependencies // {})[$p] // empty' package.json)
+              "$ACTION_PATH/scripts/check-downgrade.sh" "$pkg" "$current" "$version" "$allow_downgrade" || exit 1
 
               echo "::notice::Installing $pkg@$version in $dir"
               npm install "$pkg@$version" --save-exact --package-lock=false || {

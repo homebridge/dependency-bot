@@ -266,6 +266,7 @@ Create a configuration file (default: `.github/homebridge-dependency-bot.json`) 
 | `directories[].packages[].name` | NPM package name | Yes | - |
 | `directories[].packages[].tag` | NPM dist-tag or version range to install (e.g., "beta", "^26.x.x"), or a list of them (e.g., `["alpha", "beta"]`) to install whichever resolves to the highest version. See "How a version is chosen" | No* | - |
 | `directories[].packages[].pattern` | Regex pattern to match versions | No* | - |
+| `directories[].packages[].allow_downgrade` | Let this package move to a **lower** version than the one pinned now. See "A version never goes down" | No | `false` |
 
 *Note: Each package must specify either `tag` OR `pattern`, but not both.
 
@@ -364,6 +365,27 @@ moved `homebridge@^1.x.x` from 1.11.4 down to 1.6.1, the newest 1.x that allows 
 
 The work is done by `scripts/resolve-version.sh`.
 
+### A version never goes down
+
+Before a package is installed, the new version is compared with the version that `package.json`
+pins now. If the new version is **lower**, the run stops with an error and nothing is changed.
+
+- A version only goes down when something is wrong: a tag was moved back, or a lookup gave a wrong
+  answer. The packages this bot updates are shipped to users, often with no review.
+- When a step back is really wanted (for example a bad release was pulled), set
+  `"allow_downgrade": true` on that package in the config file, let the bot run once, and remove
+  the setting again.
+
+```json
+{
+  "name": "homebridge",
+  "tag": "latest",
+  "allow_downgrade": true
+}
+```
+
+The check is done by `scripts/check-downgrade.sh`.
+
 ### Tag Lists
 
 Give `tag` a list to follow several tags and take the newest. Each entry is resolved with
@@ -420,6 +442,8 @@ Pull request created: #123 (https://github.com/owner/repo/pull/123)
 **Permission denied**: Verify your workflow has the required permissions (see Token Handling section)
 
 **Package not found**: Check that the package name is correct and the tag/pattern matches available versions
+
+**"would go DOWN from ... to ..."**: The new version is lower than the pinned one, so the run stopped. Find out why the tag or range now gives a lower version. If it is wanted, see "A version never goes down"
 
 **Auto-merge fails**: For auto-merge functionality, ensure you're using the two-token approach with a separate `GH_TOKEN` that has PR approval permissions. GitHub prevents bots from self-approving PRs with the same token used to create them.
 
