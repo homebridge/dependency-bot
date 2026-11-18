@@ -212,6 +212,8 @@ runs:
       id: process-dirs
       if: steps.resolve-branch.outputs.skip != 'true'
       shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
       run: |
           config="${{ steps.load-config.outputs.config_abs }}"
           dirs_length="${{ steps.load-config.outputs.dirs_length }}"
@@ -240,20 +242,19 @@ runs:
               tag=$(jq -r ".directories[$i].packages[$j].tag // null" "$config")
               pattern=$(jq -r ".directories[$i].packages[$j].pattern // null" "$config")
 
-              # A list of tags/ranges: resolve each and install the highest by semver.
-              # (semver, not sort -V: sort -V ranks 2.5.0-beta.3 above 2.5.0).
+              # Work out ONE exact version first, then install exactly that version.
+              # npm is never asked to pick from a range ("npm install pkg@^1.x.x"): it skips
+              # versions whose "engines" do not allow the Node.js this action runs on, and that is
+              # how legacy Homebridge once went from 1.11.4 down to 1.6.1 (scripts/resolve-version.sh).
               if [ "$(jq -r ".directories[$i].packages[$j].tag | type" "$config")" = "array" ]; then
+                # A list of tags/ranges: resolve each and take the highest by semver.
+                # (semver, not sort -V: sort -V ranks 2.5.0-beta.3 above 2.5.0).
                 candidates=()
                 sources_list=()
 
                 while IFS= read -r t; do
-                  v=$(npm view "$pkg@$t" version --json 2>/dev/null | jq -r 'if type == "array" then .[-1] elif type == "string" then . else empty end' 2>/dev/null)
-
                   # Strict: a typo or npm hiccup must not silently pick an older version.
-                  if [ -z "$v" ]; then
-                    echo "::error::$pkg@$t did not resolve to a version"
-                    exit 1
-                  fi
+                  v=$("$ACTION_PATH/scripts/resolve-version.sh" "$pkg" "$t") || exit 1
 
                   candidates+=("$v")
                   sources_list+=("$t=$v")
@@ -265,51 +266,46 @@ runs:
                   exit 1
                 fi
 
-                tag=$(npx -y semver@7 "${candidates[@]}" | tail -n 1)
+                version=$(npx -y semver@7 "${candidates[@]}" | tail -n 1)
 
-                if [ -z "$tag" ]; then
+                if [ -z "$version" ]; then
                   echo "::error::Could not pick a version for $pkg from [${candidates[*]}]"
                   exit 1
                 fi
 
-                echo "::notice::$pkg: picked $tag from [${candidates[*]}]"
+                echo "::notice::$pkg: picked $version from [${candidates[*]}]"
 
                 winner=""
                 for sv in "${sources_list[@]}"; do
-                  [ "${sv#*=}" = "$tag" ] && winner="${winner:+$winner, }${sv%%=*}"
+                  [ "${sv#*=}" = "$version" ] && winner="${winner:+$winner, }${sv%%=*}"
                 done
 
                 all_tags=$(jq -r ".directories[$i].packages[$j].tag | join(\", \")" "$config")
                 printf '%s\t%s\t%s\n' "$dir" "$pkg" "\`$winner\` (of $all_tags)" >> "$sources"
 
               elif [ "$tag" != "null" ]; then
+                # One tag or one version range.
+                version=$("$ACTION_PATH/scripts/resolve-version.sh" "$pkg" "$tag") || exit 1
+                echo "$pkg@$tag resolves to $version"
                 printf '%s\t%s\t%s\n' "$dir" "$pkg" "\`$tag\`" >> "$sources"
 
               else
-                printf '%s\t%s\t%s\n' "$dir" "$pkg" "pattern \`$pattern\`" >> "$sources"
-              fi
-
-              if [ "$tag" != "null" ]; then
-                echo "::notice::Installing $pkg@$tag in $dir"
-                npm install "$pkg@$tag" --save-exact --package-lock=false || {
-                  echo "::error::Failed to install $pkg@$tag"
-                  exit 1
-                }
-              else
                 unescaped_pattern=$(echo "$pattern" | sed 's/\\\+/\\/g')
-                latest_version=$(npm view "$pkg" versions --json | jq -r ".[] | select(test(\"$unescaped_pattern\"))" | sort -V | tail -n 1)
+                version=$(npm view "$pkg" versions --json | jq -r ".[] | select(test(\"$unescaped_pattern\"))" | sort -V | tail -n 1)
 
-                if [ -z "$latest_version" ]; then
+                if [ -z "$version" ]; then
                   echo "::error::No versions found for $pkg matching pattern $unescaped_pattern"
                   exit 1
                 fi
 
-                echo "::notice::Installing $pkg@$latest_version in $dir"
-                npm install "$pkg@$latest_version" --save-exact --package-lock=false || {
-                  echo "::error::Failed to install $pkg@$latest_version"
-                  exit 1
-                }
+                printf '%s\t%s\t%s\n' "$dir" "$pkg" "pattern \`$pattern\`" >> "$sources"
               fi
+
+              echo "::notice::Installing $pkg@$version in $dir"
+              npm install "$pkg@$version" --save-exact --package-lock=false || {
+                echo "::error::Failed to install $pkg@$version"
+                exit 1
+              }
             done
 
             # Optional: refresh package-lock.json to match the bumped package.json.

@@ -264,7 +264,7 @@ Create a configuration file (default: `.github/homebridge-dependency-bot.json`) 
 | `directories[].directory` | Path to directory containing package.json | Yes | - |
 | `directories[].packages` | Array of packages to update | Yes | - |
 | `directories[].packages[].name` | NPM package name | Yes | - |
-| `directories[].packages[].tag` | NPM dist-tag or version range to install (e.g., "beta", "^26.x.x"), or a list of them (e.g., `["alpha", "beta"]`) to install whichever resolves to the highest version | No* | - |
+| `directories[].packages[].tag` | NPM dist-tag or version range to install (e.g., "beta", "^26.x.x"), or a list of them (e.g., `["alpha", "beta"]`) to install whichever resolves to the highest version. See "How a version is chosen" | No* | - |
 | `directories[].packages[].pattern` | Regex pattern to match versions | No* | - |
 
 *Note: Each package must specify either `tag` OR `pattern`, but not both.
@@ -348,6 +348,22 @@ Every run writes a table to the GitHub job summary: each dependency or devDepend
 old and new version, and where the new version came from (for a tag list, which tag won). It
 ends with the outcome: no changes, PR merged (or auto-merge enabled), or the pushed commit.
 
+### How a version is chosen
+
+For a tag or a version range, the action first works out **one exact version**, then installs
+exactly that version:
+
+- a dist-tag (`latest`, `beta`) gives the version the tag points at;
+- a version range (`^1.x.x`, `^24.x.x`) gives the **highest** version in the range. A deprecated
+  version is only used when every version in the range is deprecated.
+
+npm is never left to choose from a range (`npm install homebridge@^1.x.x`). When npm chooses, it
+skips versions whose `engines` do not allow the Node.js that npm itself runs on. The action runs on
+the newest LTS Node.js, and the package it updates is not run there. In November 2026 that rule
+moved `homebridge@^1.x.x` from 1.11.4 down to 1.6.1, the newest 1.x that allows any Node.js version.
+
+The work is done by `scripts/resolve-version.sh`.
+
 ### Tag Lists
 
 Give `tag` a list to follow several tags and take the newest. Each entry is resolved with
@@ -417,6 +433,18 @@ Add `ACTIONS_STEP_DEBUG: true` to your workflow environment variables for detail
 env:
   ACTIONS_STEP_DEBUG: true
 ```
+
+## Tests
+
+```bash
+test/run.sh
+```
+
+- Needs bash 4 or newer, `jq` and `python3` with PyYAML. No network: `npm` and `npx` are fakes that
+  read saved answers.
+- It tests the scripts in `scripts/`, and it runs the "Process directories and packages" step of
+  `action.yml` as the script it is.
+- The `CI` workflow runs it on every pull request.
 
 ## Contributing
 
