@@ -292,6 +292,11 @@ checks pass. `GH_TOKEN` is optional; leave it out and the approve step is skippe
 the branch needs no review). Branch names are passed to the scripts through `env`, never
 interpolated into them.
 
+The bot keeps one PR per base branch, on `update/<release_stream>-<base>`. Each run force-pushes
+fresh updates to that branch and edits the open PR instead of opening another. If someone else
+pushed their own commits to that branch, the bot leaves the branch and its PR alone and warns in
+the log.
+
 ```yaml
 name: Update Prerelease Dependencies
 on:
