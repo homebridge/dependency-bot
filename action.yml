@@ -468,29 +468,49 @@ runs:
       run: |
           changed_dirs="${{ steps.check-changes.outputs.changed_dirs }}"
           release_stream="${{ inputs.release_stream }}"
-          branch="update/$release_stream-$(date +%s)"
+          base="${BASE_BRANCH:-$DEFAULT_BRANCH}"
+          branch="update/$release_stream-$base"
 
           git checkout -b "$branch"
+
+          # One PR per base branch: if the branch already exists, only reuse it when every commit on it is the bot's.
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            git fetch origin "$branch" "$base"
+            foreign=$(git log --format=%ae "origin/$base..origin/$branch" | grep -vxF "$BOT_EMAIL" || true)
+
+            if [ -n "$foreign" ]; then
+              echo "::warning::Branch $branch has commits not made by the bot; leaving it and its PR alone"
+              echo "skipped=true" >> "$GITHUB_OUTPUT"
+              echo "branch_name=$branch" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
           git commit -m "Update $release_stream dependencies in $changed_dirs"
 
+          # Force-push so the branch is reset to fresh bumps on the current base.
           if [ -n "$PUBLISH_TOKEN" ]; then
             # Events made with GITHUB_TOKEN do not trigger workflows, so push with the App token
             # so the PR's CI runs. An empty extraheader clears the checkout's github.token header.
             git -c "http.https://github.com/.extraheader=" push \
-              "https://x-access-token:${PUBLISH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$branch"
+              "https://x-access-token:${PUBLISH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "+HEAD:refs/heads/$branch"
           else
-            git push origin "$branch"
+            git push --force origin "HEAD:refs/heads/$branch"
           fi
 
           echo "::notice::Branch pushed: $branch"
+          echo "skipped=false" >> "$GITHUB_OUTPUT"
           echo "branch_name=$branch" >> "$GITHUB_OUTPUT"
       env:
         GITHUB_TOKEN: ${{ github.token }}
         PUBLISH_TOKEN: ${{ inputs.PUBLISH_TOKEN || inputs.GH_TOKEN }}
+        BASE_BRANCH: ${{ steps.resolve-branch.outputs.branch }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        BOT_EMAIL: ${{ steps.load-config.outputs.user_email }}
 
     - name: Create PR for ${{ steps.resolve-branch.outputs.branch || github.event.repository.default_branch }} branch
       id: create-pr
-      if: steps.check-changes.outputs.changes_detected == 'true' && steps.load-config.outputs.update_method == 'pr'
+      if: steps.check-changes.outputs.changes_detected == 'true' && steps.load-config.outputs.update_method == 'pr' && steps.create-branch.outputs.skipped != 'true'
       shell: bash
       run: |
           branch="${{ steps.create-branch.outputs.branch_name }}"
@@ -531,17 +551,30 @@ runs:
             base_args=(--base "$BASE_BRANCH")
           fi
 
-          pr_url=$(gh pr create \
-            --head "$branch" \
-            "${base_args[@]}" \
-            --title "$release_stream_upper: Update $release_stream dependencies in $changed_dirs" \
-            --body "$pr_body" \
-            --label "$release_stream")
+          title="$release_stream_upper: Update $release_stream dependencies in $changed_dirs"
 
-          pr_number="${pr_url##*/}"
+          # Reuse the open PR for this branch if there is one, so each base branch keeps a single PR.
+          existing=$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // empty')
 
-          echo "::notice::Pull request created: #$pr_number ($pr_url)"
-          echo "PR created: $pr_url"
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --title "$title" --body "$pr_body"
+            pr_number="$existing"
+
+            echo "::notice::Pull request updated: #$pr_number"
+          else
+            pr_url=$(gh pr create \
+              --head "$branch" \
+              "${base_args[@]}" \
+              --title "$title" \
+              --body "$pr_body" \
+              --label "$release_stream")
+
+            pr_number="${pr_url##*/}"
+
+            echo "::notice::Pull request created: #$pr_number ($pr_url)"
+            echo "PR created: $pr_url"
+          fi
+
           echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
       env:
         GITHUB_TOKEN: ${{ github.token }}
@@ -550,7 +583,7 @@ runs:
 
     - name: Approve pull request - ${{ steps.create-pr.outputs.pr_number }}
       id: approve-pr
-      if: steps.check-changes.outputs.changes_detected == 'true' && steps.load-config.outputs.auto_merge == 'true' && steps.load-config.outputs.update_method == 'pr' && inputs.GH_TOKEN != ''
+      if: steps.check-changes.outputs.changes_detected == 'true' && steps.load-config.outputs.auto_merge == 'true' && steps.load-config.outputs.update_method == 'pr' && inputs.GH_TOKEN != '' && steps.create-branch.outputs.skipped != 'true'
       shell: bash
       run: |
         pr_number="${{ steps.create-pr.outputs.pr_number }}"
@@ -565,7 +598,7 @@ runs:
 
     - name: Auto-merge PR - ${{ steps.create-pr.outputs.pr_number }}
       id: auto-merge
-      if: steps.check-changes.outputs.changes_detected == 'true' && steps.load-config.outputs.auto_merge == 'true' && steps.load-config.outputs.update_method == 'pr'
+      if: steps.check-changes.outputs.changes_detected == 'true' && steps.load-config.outputs.auto_merge == 'true' && steps.load-config.outputs.update_method == 'pr' && steps.create-branch.outputs.skipped != 'true'
       shell: bash
       run: |
         pr_number="${{ steps.create-pr.outputs.pr_number }}"
@@ -638,7 +671,9 @@ runs:
             else
               pr="${{ steps.create-pr.outputs.pr_number }}"
 
-              if [ -z "$pr" ]; then
+              if [ "${{ steps.create-branch.outputs.skipped }}" = "true" ]; then
+                echo "⏭️ Skipped: branch \`${{ steps.create-branch.outputs.branch_name }}\` has commits not made by the bot."
+              elif [ -z "$pr" ]; then
                 echo "❌ Pull request was not created. See the step log."
               elif [ "${{ steps.auto-merge.outcome }}" = "success" ] && [ "${{ steps.load-config.outputs.merge_when_green }}" = "true" ]; then
                 echo "✅ Pull request #$pr: auto-merge enabled; merges when required checks pass."
