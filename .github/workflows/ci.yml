@@ -1,0 +1,35 @@
+name: CI
+
+# Runs the tests on every pull request. No secret is used.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the tools the tests need
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends jq python3-yaml shellcheck
+
+      - name: Lint the shell scripts (shellcheck)
+        run: shellcheck scripts/*.sh test/*.sh
+
+      - name: Run the tests
+        run: ./test/run.sh
