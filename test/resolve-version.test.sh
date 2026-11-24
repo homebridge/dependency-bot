@@ -5,7 +5,7 @@
 
 set -uo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 RESOLVE=scripts/resolve-version.sh
 failed=0
 
