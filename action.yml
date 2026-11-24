@@ -217,7 +217,10 @@ runs:
           dirs_length="${{ steps.load-config.outputs.dirs_length }}"
           sources="$RUNNER_TEMP/dependency-bot-sources.tsv"
 
+          warnings="$RUNNER_TEMP/dependency-bot-warnings.md"
+
           : > "$sources"
+          : > "$warnings"
 
           echo "Found $dirs_length directories in config"
 
@@ -240,77 +243,70 @@ runs:
               tag=$(jq -r ".directories[$i].packages[$j].tag // null" "$config")
               pattern=$(jq -r ".directories[$i].packages[$j].pattern // null" "$config")
 
-              # A list of tags/ranges: resolve each and install the highest by semver.
-              # (semver, not sort -V: sort -V ranks 2.5.0-beta.3 above 2.5.0).
-              if [ "$(jq -r ".directories[$i].packages[$j].tag | type" "$config")" = "array" ]; then
-                candidates=()
-                sources_list=()
+              # Resolve the tag (a string or a list) to one exact version, then install that.
+              # Never npm install a range: npm skips versions whose "engines" leave out the
+              # runner's Node.js. See scripts/resolve-version.sh.
+              tag_type=$(jq -r ".directories[$i].packages[$j].tag | type" "$config")
 
-                while IFS= read -r t; do
-                  v=$(npm view "$pkg@$t" version --json 2>/dev/null | jq -r 'if type == "array" then .[-1] elif type == "string" then . else empty end' 2>/dev/null)
-
-                  # Strict: a typo or npm hiccup must not silently pick an older version.
-                  if [ -z "$v" ]; then
-                    echo "::error::$pkg@$t did not resolve to a version"
-                    exit 1
-                  fi
-
-                  candidates+=("$v")
-                  sources_list+=("$t=$v")
-                  echo "$pkg@$t resolves to $v"
-                done < <(jq -r ".directories[$i].packages[$j].tag[]" "$config")
-
-                if [ ${#candidates[@]} -eq 0 ]; then
-                  echo "::error::The tag list for $pkg is empty"
-                  exit 1
-                fi
-
-                tag=$(npx -y semver@7 "${candidates[@]}" | tail -n 1)
+              if [ "$tag_type" = "string" ] || [ "$tag_type" = "array" ]; then
+                tag_json=$(jq -c ".directories[$i].packages[$j].tag" "$config")
+                resolved=$(bash "${{ github.action_path }}/scripts/resolve-version.sh" "$pkg" "$tag_json") || exit 1
+                tag="${resolved%%$'\t'*}"
+                winner="${resolved#*$'\t'}"
 
                 if [ -z "$tag" ]; then
-                  echo "::error::Could not pick a version for $pkg from [${candidates[*]}]"
+                  echo "::error::Could not pick a version for $pkg from $tag_json"
                   exit 1
                 fi
 
-                echo "::notice::$pkg: picked $tag from [${candidates[*]}]"
+                echo "::notice::$pkg: picked $tag"
 
-                winner=""
-                for sv in "${sources_list[@]}"; do
-                  [ "${sv#*=}" = "$tag" ] && winner="${winner:+$winner, }${sv%%=*}"
-                done
-
-                all_tags=$(jq -r ".directories[$i].packages[$j].tag | join(\", \")" "$config")
-                printf '%s\t%s\t%s\n' "$dir" "$pkg" "\`$winner\` (of $all_tags)" >> "$sources"
-
-              elif [ "$tag" != "null" ]; then
-                printf '%s\t%s\t%s\n' "$dir" "$pkg" "\`$tag\`" >> "$sources"
+                if [ "$tag_type" = "array" ]; then
+                  all_tags=$(jq -r ".directories[$i].packages[$j].tag | join(\", \")" "$config")
+                  printf '%s\t%s\t%s\n' "$dir" "$pkg" "\`$winner\` (of $all_tags)" >> "$sources"
+                else
+                  printf '%s\t%s\t%s\n' "$dir" "$pkg" "\`$winner\`" >> "$sources"
+                fi
 
               else
                 printf '%s\t%s\t%s\n' "$dir" "$pkg" "pattern \`$pattern\`" >> "$sources"
               fi
 
               if [ "$tag" != "null" ]; then
-                echo "::notice::Installing $pkg@$tag in $dir"
-                npm install "$pkg@$tag" --save-exact --package-lock=false || {
-                  echo "::error::Failed to install $pkg@$tag"
-                  exit 1
-                }
+                version="$tag"
               else
                 unescaped_pattern=$(echo "$pattern" | sed 's/\\\+/\\/g')
-                latest_version=$(npm view "$pkg" versions --json | jq -r ".[] | select(test(\"$unescaped_pattern\"))" | sort -V | tail -n 1)
+                version=$(npm view "$pkg" versions --json | jq -r ".[] | select(test(\"$unescaped_pattern\"))" | sort -V | tail -n 1)
 
-                if [ -z "$latest_version" ]; then
+                if [ -z "$version" ]; then
                   echo "::error::No versions found for $pkg matching pattern $unescaped_pattern"
                   exit 1
                 fi
-
-                echo "::notice::Installing $pkg@$latest_version in $dir"
-                npm install "$pkg@$latest_version" --save-exact --package-lock=false || {
-                  echo "::error::Failed to install $pkg@$latest_version"
-                  exit 1
-                }
               fi
+
+              # Never let a version go down unless the config says so.
+              current=$(jq -r --arg p "$pkg" '.dependencies[$p] // .devDependencies[$p] // empty' package.json)
+              allow_downgrade=$(jq -r ".directories[$i].packages[$j].allow_downgrade // .directories[$i].allow_downgrade // .allow_downgrade // false" "$config")
+
+              if [ "$allow_downgrade" = "true" ]; then
+                bash "${{ github.action_path }}/scripts/check-downgrade.sh" "$pkg" "$current" "$version" \
+                  || echo "::warning::$pkg goes down from $current to $version (allow_downgrade is set)"
+              else
+                bash "${{ github.action_path }}/scripts/check-downgrade.sh" "$pkg" "$current" "$version" || exit 1
+              fi
+
+              echo "::notice::Installing $pkg@$version in $dir"
+              npm install "$pkg@$version" --save-exact --package-lock=false || {
+                echo "::error::Failed to install $pkg@$version"
+                exit 1
+              }
             done
+
+            # Warn when a dependency's engines.node leaves out the Node.js this directory pins.
+            while IFS= read -r w; do
+              echo "::warning::$dir: $w"
+              printf -- '- `%s`: %s\n' "$dir" "$w" >> "$warnings"
+            done < <(bash "${{ github.action_path }}/scripts/check-engines.sh" package.json)
 
             # Optional: refresh package-lock.json to match the bumped package.json.
             if [ "$(jq -r ".directories[$i].update_lockfile // .update_lockfile // false" "$config")" = "true" ] && [ -f package-lock.json ]; then
@@ -651,6 +647,13 @@ runs:
               echo "| Directory | Package | Was | Now | Source |"
               echo "|---|---|---|---|---|"
               cat "$rows"
+              echo
+            fi
+
+            if [ -s "$RUNNER_TEMP/dependency-bot-warnings.md" ]; then
+              echo "#### ⚠️ Outside a dependency's declared Node.js support"
+              echo
+              cat "$RUNNER_TEMP/dependency-bot-warnings.md"
               echo
             fi
 
