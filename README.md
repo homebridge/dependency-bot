@@ -361,6 +361,11 @@ older prerelease (`2.5.0` over `2.5.0-beta.3`). If any entry doesn't resolve (a 
 tag, or npm being unavailable), the run fails rather than picking from the rest, so a bad lookup
 can never install an older version.
 
+A single tag works the same way: it's resolved with `npm view` and the exact version is
+installed. The bot never runs `npm install` on a range, because npm skips versions whose
+`engines` field leaves out the Node.js running the bot (on Node 26, `homebridge@^1.x.x` would
+install 1.6.1 instead of 1.11.4).
+
 ```json
 {
   "name": "homebridge-config-ui-x",
