@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  resolve-version:
-    name: Resolve versions (Node ${{ matrix.node }})
+  test:
+    name: Tests (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -23,7 +23,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
-      - run: bash test/resolve-version.test.sh
+      - run: for t in test/*.test.sh; do bash "$t" || exit 1; done
 
   shellcheck:
     runs-on: ubuntu-latest

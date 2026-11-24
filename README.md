@@ -266,6 +266,7 @@ Create a configuration file (default: `.github/homebridge-dependency-bot.json`) 
 | `directories[].packages[].name` | NPM package name | Yes | - |
 | `directories[].packages[].tag` | NPM dist-tag or version range to install (e.g., "beta", "^26.x.x"), or a list of them (e.g., `["alpha", "beta"]`) to install whichever resolves to the highest version | No* | - |
 | `directories[].packages[].pattern` | Regex pattern to match versions | No* | - |
+| `allow_downgrade` | Let a resolved version be lower than the one in package.json (warns instead of failing). May be set at top level, per directory, or per package | No | `false` |
 
 *Note: Each package must specify either `tag` OR `pattern`, but not both.
 
@@ -372,6 +373,17 @@ install 1.6.1 instead of 1.11.4).
   "tag": ["alpha", "beta"]
 }
 ```
+
+### Safety Checks
+
+- **No downgrades.** Before installing, the bot compares the resolved version with the one in
+  `package.json`. If it's lower (by semver, so `2.5.0` beats `2.5.0-beta.3`), the run fails and
+  nothing is pushed. Set `allow_downgrade: true` on the package, directory or config when a step
+  back is wanted; the bot then warns instead.
+- **Engines warning.** If a directory pins `node` as a dependency (as homebridge-apt-pkg's stream
+  files do), the bot checks each dependency's `engines.node` against that pin and lists any
+  mismatch as a warning and in the job summary. It never fails the run: shipping outside
+  `engines` can be deliberate.
 
 ### Pattern Examples
 

@@ -217,7 +217,10 @@ runs:
           dirs_length="${{ steps.load-config.outputs.dirs_length }}"
           sources="$RUNNER_TEMP/dependency-bot-sources.tsv"
 
+          warnings="$RUNNER_TEMP/dependency-bot-warnings.md"
+
           : > "$sources"
+          : > "$warnings"
 
           echo "Found $dirs_length directories in config"
 
@@ -270,27 +273,40 @@ runs:
               fi
 
               if [ "$tag" != "null" ]; then
-                echo "::notice::Installing $pkg@$tag in $dir"
-                npm install "$pkg@$tag" --save-exact --package-lock=false || {
-                  echo "::error::Failed to install $pkg@$tag"
-                  exit 1
-                }
+                version="$tag"
               else
                 unescaped_pattern=$(echo "$pattern" | sed 's/\\\+/\\/g')
-                latest_version=$(npm view "$pkg" versions --json | jq -r ".[] | select(test(\"$unescaped_pattern\"))" | sort -V | tail -n 1)
+                version=$(npm view "$pkg" versions --json | jq -r ".[] | select(test(\"$unescaped_pattern\"))" | sort -V | tail -n 1)
 
-                if [ -z "$latest_version" ]; then
+                if [ -z "$version" ]; then
                   echo "::error::No versions found for $pkg matching pattern $unescaped_pattern"
                   exit 1
                 fi
-
-                echo "::notice::Installing $pkg@$latest_version in $dir"
-                npm install "$pkg@$latest_version" --save-exact --package-lock=false || {
-                  echo "::error::Failed to install $pkg@$latest_version"
-                  exit 1
-                }
               fi
+
+              # Never let a version go down unless the config says so.
+              current=$(jq -r --arg p "$pkg" '.dependencies[$p] // .devDependencies[$p] // empty' package.json)
+              allow_downgrade=$(jq -r ".directories[$i].packages[$j].allow_downgrade // .directories[$i].allow_downgrade // .allow_downgrade // false" "$config")
+
+              if [ "$allow_downgrade" = "true" ]; then
+                bash "${{ github.action_path }}/scripts/check-downgrade.sh" "$pkg" "$current" "$version" \
+                  || echo "::warning::$pkg goes down from $current to $version (allow_downgrade is set)"
+              else
+                bash "${{ github.action_path }}/scripts/check-downgrade.sh" "$pkg" "$current" "$version" || exit 1
+              fi
+
+              echo "::notice::Installing $pkg@$version in $dir"
+              npm install "$pkg@$version" --save-exact --package-lock=false || {
+                echo "::error::Failed to install $pkg@$version"
+                exit 1
+              }
             done
+
+            # Warn when a dependency's engines.node leaves out the Node.js this directory pins.
+            while IFS= read -r w; do
+              echo "::warning::$dir: $w"
+              printf -- '- `%s`: %s\n' "$dir" "$w" >> "$warnings"
+            done < <(bash "${{ github.action_path }}/scripts/check-engines.sh" package.json)
 
             # Optional: refresh package-lock.json to match the bumped package.json.
             if [ "$(jq -r ".directories[$i].update_lockfile // .update_lockfile // false" "$config")" = "true" ] && [ -f package-lock.json ]; then
@@ -631,6 +647,13 @@ runs:
               echo "| Directory | Package | Was | Now | Source |"
               echo "|---|---|---|---|---|"
               cat "$rows"
+              echo
+            fi
+
+            if [ -s "$RUNNER_TEMP/dependency-bot-warnings.md" ]; then
+              echo "#### ⚠️ Outside a dependency's declared Node.js support"
+              echo
+              cat "$RUNNER_TEMP/dependency-bot-warnings.md"
               echo
             fi
 
